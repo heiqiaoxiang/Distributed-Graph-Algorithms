@@ -1,0 +1,204 @@
+
+"""
+
+Suzuki and Kasami's generalized
+-------------------------------
+
+I followed a description of the algorithm found on: http://vega.cs.kent.edu/~mikhail/classes/aos.f01/l17tokenDMX.pdf
+NOTE: Some of the comments seen in the code are copied from the above PDF. 
+
+However, below is a description of the algorithm from Annie Liu's course website (on Google Sites)
+(This is not the one I followed, see above link for the version of the algorithm I used.)
+
+ token holds:
+ 
+   served: array of intergers, where served[j] is the number of requests
+           made by Pj that have been served, initialized to 0.
+   pending: list of requests, of form (pid, issued), received by P0 that
+            have not been served yet, initialized to [].
+ 
+ Pi decentralized from two parts above:
+ 
+   issued: array of integers, where issued[j] is the number of requests
+      made by Pj, initialized to 0.
+   token_held: boolean, initialized to false.
+   token_present: boolean, initialized to false.
+   pending: list of requests, of form (pid, issued), received by Pi that
+            have not been served yet, initialized to [].
+ 
+   request:                                                     Pi
+     issued[i] := issued[i]+1                                   Pi
+     send (request,issued,i) to all processes (including self). Pi
+ 
+     await:
+       having received (token)                                  Pi,P0
+     token_held := true                                         Pi
+     token_present := true                                      P0
+                                        `                        P0-checkreq()
+     for u in pending: if some j, u.issued[j]>token.served[j]:  new (u>tk.served)
+       add u to token.pending                                   new
+     pending := []                                              new
+ 
+   CS                                                           Pi
+ 
+   release:                                                     Pi
+                                                                Pi-sd token to P0
+     token_held := false                                        Pi
+     checkreq()                                                 P0-if
+ 
+   receive (any other prog msg):                                Pi
+     issued := max(issued, any.issued)                          Pi
+ 
+   receive (request,iss,j):                                     P0
+     issued := max(issued, iss)                                 Pi
+     if token_present:                                          P0
+       add (j,issued) to token.pending                          P0+token.
+       if not token_held: checkreq()                            P0+if:
+     else:                                                      new
+       add (j,issued) to pending                                P0 diff pending
+ 
+   checkreq(): //P0, except pending -> token.pending, served -> token.served
+     eligible := { (j,iss) in token.pending: all k!=j, iss[k]<=token.served[k] }
+                 //all others's issued requests before j have been served
+     if eligible != {}:
+       (j,iss) := first of eligible
+       remove (j,iss) from token.pending
+       token.served[j] := token.served[j]+1
+       send (token) to Pj
+       token_present := false
+
+"""
+
+#from queue import Queue
+from collections import deque
+
+nprocs = 5 # default number of processes
+cs_count = 25 # default number of calls to CS
+
+first_token_holder = None
+
+def Pi(proc):
+    return int(str(proc))
+
+class P(DistProcess):
+    
+    def setup(ps):
+        procs = dict() # dict mapping process numbers to processes
+        for (pn, p) in ps.items():
+            procs[int(pn)] = p
+        
+        other_procs = set(ps.values())
+        
+        """RNi[k] contains the largest sequence number 
+        received from process k in a request message."""
+        RN = [0] * nprocs
+        
+        """Token consists of vector and a queue:
+            - LN[k] contains the sequence number of the latest executed 
+              request from process k
+            - Q is the queue of requesting process """
+        LN = [0] * nprocs
+        Q = deque()
+        
+        have_token = False
+        
+        if Pi(self) == 0:
+            have_token = True
+
+    def cs(task):
+        --start
+        
+        # Acquire token if necessary
+        if not have_token:
+            incr_logical_clock()
+            #output("Sending requests for token...")
+            send( Request( logical_clock() ), other_procs )
+            await( have_token == True )        
+        # Now I have the token!
+
+        "Perform critical section task"
+        task()
+        
+        """When a process i leaves the CS, it:
+            Sets LN[i] of the token equal to RNi[i]
+            Indicates that its request RNi[i] has been executed"""        
+        #output("Leaving CS...")
+        
+        i = Pi(self)
+        LN[i] = RN[i]
+        
+        output("Is releasing.")
+        
+        --release
+        
+        """For every process k whose ID is not in the token queue Q, 
+        it appends its ID to Q if RNi[k] == LN[k]+1 """
+        for k in procs.keys():
+            if k not in set(Q):
+                if RN[k] > LN[k]:
+                    Q.append(k)
+        #output("Q = "+repr(Q))
+        
+        if have_token:
+            if len(Q) > 0:
+                j = Q.popleft()
+                have_token = False
+                token = (LN, Q)
+                send(Reply(token), procs[j])
+                
+        --end
+
+    def OnRequest(ts):
+        #output(repr(self) + " Received request from "+repr(_source))
+        
+        i = Pi(_source)     
+        RN[i] = max(RN[i], ts)            
+        
+        if have_token:
+            if RN[i] > LN[i]:
+                "Send token to process i"
+                have_token = False
+                token = (LN, Q)
+                send(Reply(token), procs[i])
+
+    def OnReply(tok):
+        _LN, _Q = tok
+        output("Got token from "+repr(_source)+" !!!")
+        have_token = True
+
+    def main():
+        global cs_count
+
+        def anounce():
+            output("In cs!")
+
+        #for i in range(0, cs_count):
+        while True:
+            cs(anounce)
+
+def main():
+    # number of times to execute critical section
+    global cs_count
+    if len(sys.argv) > 2:
+        cs_count = int(sys.argv[2])
+
+    # configuration: number of processes
+    global nprocs
+    if len(sys.argv) > 1:
+        nprocs = int(sys.argv[1])
+
+    use_channel("tcp")
+
+    # create n process
+    ps = createprocs(P, {str(i) for i in range(0, nprocs)})
+    ps_v = set(ps.values())
+
+    # setup the processes
+    for name, p in ps.items():
+        other_ps = dict(ps)
+        other_ps.pop(name)
+        setupprocs([p], [other_ps])
+
+    startprocs(ps_v)
+    
+    for p in ps_v: p.join()
